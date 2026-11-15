@@ -1,8 +1,9 @@
 from games.dodgeball import dodgeball
+from games.reflex import reflex
 
 
 def main():
-    dodgeball.run()
+    reflex.run(duration=60)
 
 
 if __name__ == "__main__":
