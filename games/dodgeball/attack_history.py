@@ -37,7 +37,10 @@ class AttackHistory:
         left_shoulder = points[11]
         right_shoulder = points[12]
 
-        if left_shoulder is None or right_shoulder is None:
+        if (
+            left_shoulder is None
+            or right_shoulder is None
+        ):
             return None
 
         center_x = (
@@ -68,6 +71,9 @@ class AttackHistory:
         self.current_attack = {
             "throw": self.throw_count,
             "score": score,
+
+            "source": ball.source,
+            "target_name": ball.target_name,
 
             "origin": self.normalize_position(
                 ball.start_x,
@@ -137,7 +143,6 @@ class AttackHistory:
         ):
             return "stationary"
 
-        # Determine the dominant movement direction.
         if abs(dx) >= abs(dy):
 
             if dx > 0:
@@ -173,8 +178,10 @@ class AttackHistory:
             )
         )
 
-        if start_position is not None and end_position is not None:
-
+        if (
+            start_position is not None
+            and end_position is not None
+        ):
             distance = math.dist(
                 start_position,
                 end_position,

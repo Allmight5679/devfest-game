@@ -18,12 +18,17 @@ class Ball:
         target_x,
         target_y,
         duration=3.0,
+        target_name="chest",
+        source="Local",
     ):
         self.start_x = start_x
         self.start_y = start_y
 
         self.target_x = target_x
         self.target_y = target_y
+
+        self.target_name = target_name
+        self.source = source
 
         self.duration = duration
         self.elapsed = 0.0
@@ -33,7 +38,6 @@ class Ball:
         self.y = start_y
 
         self.radius = START_RADIUS
-
         self.finished = False
 
 
@@ -41,7 +45,10 @@ class Ball:
         if self.finished:
             return
 
-        self.elapsed += delta_time
+        self.elapsed = min(
+            self.elapsed + delta_time,
+            self.duration,
+        )
 
         self.progress = min(
             self.elapsed / self.duration,
@@ -61,13 +68,12 @@ class Ball:
             + (self.target_y - self.start_y) * t
         )
 
-        # Increase the radius to simulate depth.
+        # Nonlinear growth to simulate depth.
         self.radius = int(
             START_RADIUS
             + (END_RADIUS - START_RADIUS) * (t ** 1.8)
         )
 
-        # The ball has reached the player.
         if self.progress >= 1.0:
             self.finished = True
 
@@ -98,7 +104,7 @@ class Ball:
             cv2.LINE_AA,
         )
 
-        # Highlight for a more rounded appearance.
+        # Highlight.
         highlight_center = (
             int(self.x - self.radius * 0.3),
             int(self.y - self.radius * 0.3),

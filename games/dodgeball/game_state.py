@@ -49,13 +49,16 @@ class GameState:
 
         if valid_player:
 
-            # Update Gemini's strategy asynchronously.
+            # Update Gemini's strategy using
+            # attack history and visible targets.
             opponent.update_strategy(
                 self.attack_history.get_history(),
                 self.score,
+                frame,
+                points,
             )
 
-            # Spawn a new ball when needed.
+            # Spawn a new ball.
             if self.ball is None:
 
                 self.ball = opponent.spawn_ball(
@@ -72,6 +75,7 @@ class GameState:
                 )
 
             else:
+
                 self.ball.update(delta_time)
 
                 self.attack_history.record_movement(
@@ -82,11 +86,8 @@ class GameState:
 
         elif in_grace_period:
 
-            # Continue animation during brief
-            # tracking interruptions.
             if self.ball is not None:
                 self.ball.update(delta_time)
-
 
     def resolve_collision(
         self,

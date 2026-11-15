@@ -11,6 +11,13 @@ from client.gemini_client import GeminiClient
 from .ball import Ball
 from .difficulty import get_duration
 
+from .targeting import (
+    TARGETS,
+    get_available_targets,
+    choose_random_target,
+    get_target_position,
+)
+
 
 API_COOLDOWN = 3.0
 THROWS_PER_REQUEST = 3
@@ -19,7 +26,7 @@ MAX_X_OFFSET = 0.15
 MAX_Y_OFFSET = 0.10
 
 MIN_SPAWN_DISTANCE = 0.15
-MIN_HISTORY = 1
+MIN_HISTORY = 3
 
 SPAWN_POSITIONS = {
     "top_left": (0.05, 0.20),
@@ -52,7 +59,7 @@ class Opponent:
                 f"{type(error).__name__}"
             )
 
-        # Run Gemini requests outside the game loop.
+        # Keep API requests outside the game loop.
         self.executor = ThreadPoolExecutor(
             max_workers=1
         )
@@ -64,16 +71,22 @@ class Opponent:
 
         self.attack_queue = deque()
 
-        self.strategy = "Collecting player movement data"
+        # Track the initial calibration throws.
+        self.calibration_targets = []
+        self.throw_count = 0
 
+        self.strategy = "Collecting player movement data"
         self.last_attack_source = "Local"
 
 
     def reset(self):
-        # Invalidate responses from the previous game.
+        # Invalidate responses from previous games.
         self.session_id += 1
 
         self.attack_queue.clear()
+
+        self.calibration_targets.clear()
+        self.throw_count = 0
 
         if self.future is not None:
             if self.future.cancel():
@@ -90,41 +103,14 @@ class Opponent:
         )
 
 
-    def get_chest_position(self, frame, points):
-        h, w = frame.shape[:2]
-
-        target_x = w // 2
-        target_y = h // 2
-
-        if points is not None:
-            left_shoulder = points[11]
-            right_shoulder = points[12]
-
-            if (
-                left_shoulder is not None
-                and right_shoulder is not None
-            ):
-                target_x = (
-                    left_shoulder[0]
-                    + right_shoulder[0]
-                ) / 2
-
-                shoulder_y = (
-                    left_shoulder[1]
-                    + right_shoulder[1]
-                ) / 2
-
-                target_y = shoulder_y + h * 0.1
-
-        return target_x, target_y
-
-
     def summarize_history(self, history):
         summary = []
 
         for attack in history[-10:]:
             summary.append({
                 "throw": attack["throw"],
+                "source": attack["source"],
+                "target_name": attack["target_name"],
                 "origin": attack["origin"],
                 "target": attack["target"],
                 "player_start": attack["player_start"],
@@ -138,50 +124,80 @@ class Opponent:
         return summary
 
 
-    def build_prompt(self, history, score):
+    def build_prompt(
+        self,
+        history,
+        score,
+        available_targets,
+    ):
         summary = self.summarize_history(history)
 
         return f"""
 You are the strategic opponent in a
 motion-controlled dodgeball game.
 
-Analyze the player's recent attack history
-and predict how they might dodge future balls.
+Your goal is to analyze the player's previous
+movements and predict future dodges.
 
 Current player score: {score}
 
 Recent attack history:
 {json.dumps(summary)}
 
-All coordinates are normalized between 0 and 1.
+The first three attacks are randomly generated
+to observe the player's natural reactions.
 
-Positive X means right.
-Negative X means left.
-Positive Y means down.
-Negative Y means up.
+Use these observations and subsequent attack
+outcomes to improve your strategy.
 
-The history records the player's shoulder center.
-Each attack is aimed relative to the player's
-chest position at the moment of launch.
+All absolute coordinates are normalized
+between 0 and 1.
+
+X increases toward the right of the screen.
+Y increases toward the bottom of the screen.
+
+The player's recorded position is their
+shoulder center.
+
+Available body targets:
+{", ".join(available_targets)}
+
+Body target meanings:
+- head: player's face
+- chest: player's upper torso
+- left: screen-left shoulder
+- right: screen-right shoulder
 
 Plan exactly {THROWS_PER_REQUEST} upcoming throws.
 
 Allowed launch origins:
 {", ".join(SPAWN_POSITIONS.keys())}
 
+Each throw must specify a visible body target.
+
+Target offsets are relative to the selected
+body part at the moment the ball is launched.
+
 Target offset restrictions:
 - X must be between -0.15 and 0.15.
 - Y must be between -0.10 and 0.10.
 
-A negative X offset anticipates a leftward dodge.
-A positive X offset anticipates a rightward dodge.
+Negative X anticipates movement to the left.
+Positive X anticipates movement to the right.
+Negative Y anticipates upward movement.
+Positive Y anticipates downward movement.
 
-Try to exploit repeated movement patterns.
-Vary the launch origins and target offsets.
-Do not make every throw identical.
+Analyze which body targets cause particular
+dodge directions.
+
+Vary the body targets and launch origins.
+Try to predict the player's repeated patterns.
+Avoid making all three attacks identical.
 
 You do not control ball size, ball speed,
 travel duration, lives, or collision detection.
+
+Keep the strategy explanation under 25 words.
 
 Return only valid JSON using this format:
 
@@ -190,17 +206,20 @@ Return only valid JSON using this format:
     "throws": [
         {{
             "origin": "top_right",
-            "target_offset_x": -0.08,
+            "target": "head",
+            "target_offset_x": -0.05,
             "target_offset_y": 0.0
         }},
         {{
             "origin": "middle_left",
-            "target_offset_x": 0.05,
+            "target": "right",
+            "target_offset_x": 0.03,
             "target_offset_y": 0.0
         }},
         {{
             "origin": "bottom_right",
-            "target_offset_x": -0.10,
+            "target": "chest",
+            "target_offset_x": 0.10,
             "target_offset_y": 0.02
         }}
     ]
@@ -208,25 +227,33 @@ Return only valid JSON using this format:
 """
 
 
-    def request_strategy(self, history, score):
+    def request_strategy(
+        self,
+        history,
+        score,
+        available_targets,
+    ):
         if self.client is None:
             return
 
-        # Wait until we have some gameplay history.
+        # Wait until three attacks are completed.
         if len(history) < MIN_HISTORY:
+            return
+
+        if not available_targets:
             return
 
         # Only allow one outstanding request.
         if self.future is not None:
             return
 
-        # Keep using the existing queue.
+        # Keep executing the existing queue.
         if len(self.attack_queue) > 1:
             return
 
         current_time = time.monotonic()
 
-        # Enforce the three-second cooldown.
+        # Enforce cooldown.
         if (
             current_time - self.last_request_time
             < API_COOLDOWN
@@ -241,6 +268,7 @@ Return only valid JSON using this format:
         prompt = self.build_prompt(
             history,
             score,
+            available_targets,
         )
 
         self.last_request_time = current_time
@@ -267,8 +295,15 @@ Return only valid JSON using this format:
             return None
 
         origin = attack.get("origin")
+        target = attack.get("target")
+
+        if not isinstance(origin, str):
+            return None
 
         if origin not in SPAWN_POSITIONS:
+            return None
+
+        if target not in TARGETS:
             return None
 
         try:
@@ -280,17 +315,20 @@ Return only valid JSON using this format:
                 attack["target_offset_y"]
             )
 
-        except (KeyError, TypeError, ValueError):
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            OverflowError,
+        ):
             return None
 
-        # Reject invalid numerical values.
         if not (
             math.isfinite(offset_x)
             and math.isfinite(offset_y)
         ):
             return None
 
-        # Reject excessively large offsets.
         if abs(offset_x) > MAX_X_OFFSET:
             return None
 
@@ -299,13 +337,13 @@ Return only valid JSON using this format:
 
         return {
             "origin": origin,
+            "target": target,
             "target_offset_x": offset_x,
             "target_offset_y": offset_y,
         }
 
 
     def poll_strategy(self):
-        # Do not block the webcam while waiting.
         if self.future is None:
             return
 
@@ -318,7 +356,7 @@ Return only valid JSON using this format:
         try:
             session_id, response = future.result()
 
-            # Ignore responses from a previous game.
+            # Ignore responses from previous games.
             if session_id != self.session_id:
                 return
 
@@ -327,7 +365,7 @@ Return only valid JSON using this format:
 
             response = response.strip()
 
-            # Remove optional Markdown code fences.
+            # Remove optional Markdown fences.
             if response.startswith("```"):
                 lines = response.splitlines()
                 response = "\n".join(lines[1:])
@@ -337,6 +375,9 @@ Return only valid JSON using this format:
 
             data = json.loads(response.strip())
 
+            if not isinstance(data, dict):
+                return
+
             throws = data.get("throws", [])
 
             if not isinstance(throws, list):
@@ -345,6 +386,7 @@ Return only valid JSON using this format:
             validated = []
 
             for attack in throws[:THROWS_PER_REQUEST]:
+
                 attack = self.validate_attack(attack)
 
                 if attack is not None:
@@ -354,6 +396,8 @@ Return only valid JSON using this format:
                 print("[Opponent] Invalid Gemini strategy.")
                 return
 
+            # Preserve our queue fix.
+            # Append instead of discarding old attacks.
             self.attack_queue.extend(validated)
 
             self.strategy = str(
@@ -376,21 +420,46 @@ Return only valid JSON using this format:
             )
 
 
-    def get_local_attack(self):
-        # Original random opponent.
+    def get_local_attack(self, frame, points):
+        excluded = []
+
+        # Avoid repeating targets during the
+        # initial three calibration throws.
+        if self.throw_count < MIN_HISTORY:
+            excluded = self.calibration_targets
+
+        target = choose_random_target(
+            frame,
+            points,
+            excluded=excluded,
+        )
+
         return {
             "origin": random.choice(DEFAULT_ORIGINS),
+            "target": target,
             "target_offset_x": 0.0,
             "target_offset_y": 0.0,
         }
 
 
-    def update_strategy(self, history, score):
+    def update_strategy(
+        self,
+        history,
+        score,
+        frame,
+        points,
+    ):
         self.poll_strategy()
+
+        available_targets = get_available_targets(
+            frame,
+            points,
+        )
 
         self.request_strategy(
             history,
             score,
+            available_targets,
         )
 
 
@@ -415,56 +484,87 @@ Return only valid JSON using this format:
             normalized_target,
         )
 
-        # Prevent balls from spawning too close
-        # to their intended impact location.
+        # Avoid spawning too close to the target.
         if distance < MIN_SPAWN_DISTANCE:
 
-            valid_positions = [
-                position
-                for position in SPAWN_POSITIONS.values()
+            valid_origins = [
+                name
+                for name, position
+                in SPAWN_POSITIONS.items()
                 if math.dist(
                     position,
                     normalized_target,
                 ) >= MIN_SPAWN_DISTANCE
             ]
 
-            if valid_positions:
-                spawn = random.choice(valid_positions)
+            if valid_origins:
+                origin = random.choice(valid_origins)
+                spawn = SPAWN_POSITIONS[origin]
 
         return (
             int(spawn[0] * w),
             int(spawn[1] * h),
+            origin,
         )
 
 
     def spawn_ball(self, frame, points, score):
         h, w = frame.shape[:2]
 
-        # Check whether Gemini has returned a plan.
         self.poll_strategy()
 
-        if self.attack_queue:
+        # First three throws must be local.
+        if self.throw_count < MIN_HISTORY:
+
+            attack = self.get_local_attack(
+                frame,
+                points,
+            )
+
+            self.last_attack_source = "Calibration"
+
+        elif self.attack_queue:
+
             attack = self.attack_queue.popleft()
+
             self.last_attack_source = "Gemini"
 
         else:
-            attack = self.get_local_attack()
+
+            attack = self.get_local_attack(
+                frame,
+                points,
+            )
+
             self.last_attack_source = "Local"
 
-        # Calculate the current chest position.
-        target_x, target_y = self.get_chest_position(
+        # Resolve the requested body target.
+        target_name, position = get_target_position(
             frame,
             points,
+            attack["target"],
         )
 
-        # Apply Gemini's predicted dodge offset.
-        target_x += (
-            attack["target_offset_x"] * w
-        )
+        target_x, target_y = position
 
-        target_y += (
-            attack["target_offset_y"] * h
-        )
+        # Only apply predictive offsets if the
+        # requested body target is still visible.
+        if target_name == attack["target"]:
+
+            target_x += (
+                attack["target_offset_x"] * w
+            )
+
+            target_y += (
+                attack["target_offset_y"] * h
+            )
+
+        else:
+
+            print(
+                f"[Opponent] Target unavailable: "
+                f"{attack['target']} -> {target_name}"
+            )
 
         # Keep the target inside the camera frame.
         target_x = max(
@@ -477,26 +577,38 @@ Return only valid JSON using this format:
             min(target_y, h - 1),
         )
 
-        start_x, start_y = self.get_spawn_position(
-            attack["origin"],
-            target_x,
-            target_y,
-            frame,
+        # Record the actual calibration target.
+        if self.throw_count < MIN_HISTORY:
+            self.calibration_targets.append(
+                target_name
+            )
+
+        self.throw_count += 1
+
+        start_x, start_y, actual_origin = (
+            self.get_spawn_position(
+                attack["origin"],
+                target_x,
+                target_y,
+                frame,
+            )
         )
 
         print(
             f"[Opponent: {self.last_attack_source}] "
-            f"Origin: {attack['origin']} | "
-            f"Offset X: {attack['target_offset_x']:.2f} | "
-            f"Offset Y: {attack['target_offset_y']:.2f} | "
+            f"Throw: {self.throw_count} | "
+            f"Origin: {actual_origin} | "
+            f"Target: {target_name} | "
             f"Queued: {len(self.attack_queue)}"
         )
 
-        # Gemini has no control over duration or radius.
+        # Ball speed and size remain local.
         return Ball(
             start_x,
             start_y,
             target_x,
             target_y,
             duration=get_duration(score),
+            target_name=target_name,
+            source=self.last_attack_source,
         )

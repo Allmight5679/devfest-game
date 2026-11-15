@@ -54,20 +54,12 @@ def run():
 
             # Calculate frame timing.
             current_time = time.monotonic()
-            delta_time = current_time - previous_time
+
+            delta_time = (
+                current_time - previous_time
+            )
+
             previous_time = current_time
-
-            # Draw the tracked player.
-            if valid_player:
-                output = pose.draw_segmentation(
-                    output,
-                    mask,
-                )
-
-                output = pose.draw_pose(
-                    output,
-                    points,
-                )
 
             # Update gameplay and opponent strategy.
             state.update_ball(
@@ -80,7 +72,10 @@ def run():
             )
 
             # Draw the active ball.
-            if tracker.locked and state.ball is not None:
+            if (
+                tracker.locked
+                and state.ball is not None
+            ):
                 state.ball.draw(output)
 
             # Resolve collision and record outcome.
@@ -92,17 +87,18 @@ def run():
                 current_time,
             )
 
-            # Draw tracking status.
-            output = tracker.draw_status(output)
-
-            # Draw the game interface.
+            # Draw the updated game interface.
             output = draw_interface(
                 output,
                 state,
+                tracker,
                 current_time,
             )
 
-            cv2.imshow(WINDOW_NAME, output)
+            cv2.imshow(
+                WINDOW_NAME,
+                output,
+            )
 
             key = cv2.waitKey(1) & 0xFF
 
@@ -112,6 +108,7 @@ def run():
 
             # Restart the game.
             if key == ord("r"):
+
                 tracker.reset()
                 state.reset()
                 opponent.reset()
