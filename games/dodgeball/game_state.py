@@ -1,4 +1,7 @@
+import json
+
 from .collision import check_collision
+from .attack_history import AttackHistory
 
 
 STARTING_LIVES = 3
@@ -8,10 +11,13 @@ WHITE = (255, 255, 255)
 GREEN = (0, 255, 0)
 RED = (0, 0, 255)
 
+DEBUG_HISTORY = False
+
 
 class GameState:
 
     def __init__(self):
+        self.attack_history = AttackHistory()
         self.reset()
 
 
@@ -26,6 +32,8 @@ class GameState:
         self.message_color = WHITE
         self.message_time = 0.0
 
+        self.attack_history.reset()
+
 
     def update_ball(
         self,
@@ -36,15 +44,28 @@ class GameState:
         in_grace_period,
         delta_time,
     ):
-        # Do not update gameplay after game over.
         if self.game_over:
             return
 
         if valid_player:
 
+            # Update Gemini's strategy asynchronously.
+            opponent.update_strategy(
+                self.attack_history.get_history(),
+                self.score,
+            )
+
             # Spawn a new ball when needed.
             if self.ball is None:
+
                 self.ball = opponent.spawn_ball(
+                    frame,
+                    points,
+                    self.score,
+                )
+
+                self.attack_history.start_attack(
+                    self.ball,
                     frame,
                     points,
                     self.score,
@@ -52,6 +73,12 @@ class GameState:
 
             else:
                 self.ball.update(delta_time)
+
+                self.attack_history.record_movement(
+                    self.ball,
+                    frame,
+                    points,
+                )
 
         elif in_grace_period:
 
@@ -63,6 +90,8 @@ class GameState:
 
     def resolve_collision(
         self,
+        frame,
+        points,
         mask,
         valid_player,
         current_time,
@@ -76,11 +105,21 @@ class GameState:
         ):
             return
 
-        result = check_collision(self.ball, mask)
+        result = check_collision(
+            self.ball,
+            mask,
+        )
 
         # Wait if tracking is unavailable.
         if result is None:
             return
+
+        # Record the attack outcome.
+        self.attack_history.finish_attack(
+            frame,
+            points,
+            result,
+        )
 
         if result:
             self.lives -= 1
@@ -102,10 +141,20 @@ class GameState:
             f"Lives: {self.lives}"
         )
 
+        if DEBUG_HISTORY:
+            history = self.attack_history.get_history()
+
+            if history:
+                print(
+                    json.dumps(
+                        history[-1],
+                        indent=4,
+                    )
+                )
+
         # Remove the resolved ball.
         self.ball = None
 
-        # Check whether the game has ended.
         if self.lives <= 0:
             self.game_over = True
 

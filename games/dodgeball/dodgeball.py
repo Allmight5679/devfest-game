@@ -15,7 +15,9 @@ WINDOW_NAME = "DodgeAI"
 
 def run():
     cap = camera.create_camera()
+
     detector = None
+    opponent = None
 
     try:
         detector = pose.create_detector()
@@ -28,7 +30,7 @@ def run():
 
         while True:
 
-            # Capture the current camera frame.
+            # Capture the camera frame.
             frame = camera.get_frame(cap)
 
             if frame is None:
@@ -50,7 +52,7 @@ def run():
                 mask,
             )
 
-            # Calculate the time between frames.
+            # Calculate frame timing.
             current_time = time.monotonic()
             delta_time = current_time - previous_time
             previous_time = current_time
@@ -67,7 +69,7 @@ def run():
                     points,
                 )
 
-            # Update the current ball.
+            # Update gameplay and opponent strategy.
             state.update_ball(
                 opponent,
                 frame,
@@ -77,18 +79,20 @@ def run():
                 delta_time,
             )
 
-            # Draw the ball, including at impact.
+            # Draw the active ball.
             if tracker.locked and state.ball is not None:
                 state.ball.draw(output)
 
-            # Resolve collisions.
+            # Resolve collision and record outcome.
             state.resolve_collision(
+                frame,
+                points,
                 mask,
                 valid_player,
                 current_time,
             )
 
-            # Display player tracking status.
+            # Draw tracking status.
             output = tracker.draw_status(output)
 
             # Draw the game interface.
@@ -98,7 +102,6 @@ def run():
                 current_time,
             )
 
-            # Display the current frame.
             cv2.imshow(WINDOW_NAME, output)
 
             key = cv2.waitKey(1) & 0xFF
@@ -111,6 +114,7 @@ def run():
             if key == ord("r"):
                 tracker.reset()
                 state.reset()
+                opponent.reset()
 
                 previous_time = time.monotonic()
 
@@ -119,5 +123,8 @@ def run():
 
         if detector is not None:
             detector.close()
+
+        if opponent is not None:
+            opponent.close()
 
         cv2.destroyAllWindows()
